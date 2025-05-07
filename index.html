@@ -7,18 +7,36 @@
     <style>
         body { font-family: sans-serif; padding: 20px; }
         canvas { border: 1px solid #000; display: block; margin: 20px 0; }
-        .color-step { display: inline-block; width: 30px; height: 30px; margin: 4px; border: 2px solid black; cursor: pointer; }
         #status { margin-top: 10px; font-style: italic; }
-        #output { white-space: pre-wrap; }
+        #output { margin-top: 10px; white-space: pre-wrap; }
+        .color-button {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            margin: 2px;
+            border: 1px solid #000;
+            cursor: pointer;
+        }
+        .solution-color {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-right: 5px;
+            border: 1px solid #000;
+            vertical-align: middle;
+        }
+        .solution-step {
+            margin: 5px 0;
+        }
     </style>
 </head>
 <body>
-<h1>Interactive Color Fill Solver</h1>
+<h1>Color Fill Puzzle Solver</h1>
 <input type="file" id="upload" accept="image/*" />
 <canvas id="canvas"></canvas>
+<div id="color-buttons"></div>
 <div id="status"></div>
 <div id="output"></div>
-<div id="steps"></div>
 
 <script>
     const upload = document.getElementById('upload');
@@ -26,57 +44,180 @@
     const ctx = canvas.getContext('2d');
     const status = document.getElementById('status');
     const output = document.getElementById('output');
-    const stepsDiv = document.getElementById('steps');
+    const colorButtons = document.getElementById('color-buttons');
 
     const GRID_ROWS = 12;
     const GRID_COLS = 12;
-    const COLOR_DISTANCE_THRESHOLD = 50;
+    const EXPECTED_COLORS = 6;
+    const COLOR_MERGE_THRESHOLD = 50;
 
-    let colorPalette = []; // Will hold actual RGB for each label
-    let currentGrid = null;
-
+    // Return Euclidean distance in RGB space
     function colorDistance(c1, c2) {
-        return Math.sqrt(
-            (c1[0] - c2[0]) ** 2 +
-            (c1[1] - c2[1]) ** 2 +
-            (c1[2] - c2[2]) ** 2
-        );
+        const [r1, g1, b1] = c1;
+        const [r2, g2, b2] = c2;
+        return Math.sqrt((r1 - r2)**2 + (g1 - g2)**2 + (b1 - b2)**2);
     }
 
-    function groupColors(avgColors) {
-        const clusters = [];
-        const labels = [];
+    // Convert "rgb(r,g,b)" to [r, g, b]
+    function parseRGB(rgb) {
+        return rgb.match(/\d+/g).map(Number);
+    }
 
-        for (const color of avgColors) {
-            let found = false;
-            for (let i = 0; i < clusters.length; i++) {
-                if (colorDistance(color, clusters[i]) < COLOR_DISTANCE_THRESHOLD) {
-                    labels.push(i);
-                    found = true;
+    // Convert [r, g, b] to "rgb(r,g,b)"
+    function toRGBString([r, g, b]) {
+        return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+    }
+
+    // K-means++ initialization
+    function kMeansPlusPlus(colors, k) {
+        let centroids = [];
+        if (colors.length === 0) return Array(k).fill([0, 0, 0]);
+        centroids.push([...colors[Math.floor(Math.random() * colors.length)]]);
+
+        for (let i = 1; i < k; i++) {
+            const distances = colors.map(color => {
+                const minDist = Math.min(...centroids.map(c => colorDistance(color, c)));
+                return minDist ** 2;
+            });
+            const total = distances.reduce((a, b) => a + b, 0);
+            if (total === 0) {
+                centroids.push([...colors[Math.floor(Math.random() * colors.length)]]);
+                continue;
+            }
+            const r = Math.random() * total;
+            let sum = 0;
+            for (let j = 0; j < distances.length; j++) {
+                sum += distances[j];
+                if (sum >= r) {
+                    centroids.push([...colors[j]]);
                     break;
                 }
             }
-            if (!found) {
-                clusters.push(color);
-                labels.push(clusters.length - 1);
-            }
         }
-        return { clusters, labels };
+        return centroids;
     }
 
-    function getRegion(grid, startR = 0, startC = 0) {
-        const startColor = grid[startR][startC];
+    // K-means clustering function
+    function kMeansClustering(colors, k) {
+        if (colors.length < k) {
+            return [[0, 0, 0], ...Array(k - 1).fill([128, 128, 128])];
+        }
+        let centroids = kMeansPlusPlus(colors, k);
+        let assignments = new Array(colors.length);
+        let maxIterations = 15;
+        let converged = false;
+
+        for (let iteration = 0; iteration < maxIterations && !converged; iteration++) {
+            converged = true;
+
+            for (let i = 0; i < colors.length; i++) {
+                let minDist = Infinity;
+                let closestCentroid = -1;
+
+                for (let j = 0; j < centroids.length; j++) {
+                    const dist = colorDistance(colors[i], centroids[j]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        closestCentroid = j;
+                    }
+                }
+
+                if (assignments[i] !== closestCentroid) {
+                    assignments[i] = closestCentroid;
+                    converged = false;
+                }
+            }
+
+            for (let j = 0; j < k; j++) {
+                let clusterColors = colors.filter((_, idx) => assignments[idx] === j);
+                if (clusterColors.length > 0) {
+                    const newCentroid = clusterColors.reduce(
+                        (acc, color) => {
+                            acc[0] += color[0];
+                            acc[1] += color[1];
+                            acc[2] += color[2];
+                            return acc;
+                        },
+                        [0, 0, 0]
+                    ).map(sum => sum / clusterColors.length);
+                    centroids[j] = newCentroid;
+                }
+            }
+        }
+
+        // Merge similar centroids, but protect black
+        for (let i = 0; i < centroids.length; i++) {
+            for (let j = i + 1; j < centroids.length; j++) {
+                const isBlackI = colorDistance(centroids[i], [0, 0, 0]) < 10;
+                const isBlackJ = colorDistance(centroids[j], [0, 0, 0]) < 10;
+                if (isBlackI || isBlackJ) continue;
+                if (colorDistance(centroids[i], centroids[j]) < COLOR_MERGE_THRESHOLD) {
+                    centroids[j] = centroids[i];
+                }
+            }
+        }
+        return [...new Set(centroids.map(c => toRGBString(c)))].map(parseRGB);
+    }
+
+    // Get dominant color from a small central region
+    function getDominantColor(data, globalCentroids) {
+        let colors = [];
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            colors.push([r, g, b]);
+        }
+
+        if (colors.length === 0) {
+            return toRGBString(globalCentroids[0] || [128, 128, 128]);
+        }
+
+        const counts = new Array(globalCentroids.length).fill(0);
+        for (const color of colors) {
+            let minDist = Infinity;
+            let closestCentroidIdx = 0;
+            for (let j = 0; j < globalCentroids.length; j++) {
+                const dist = colorDistance(color, globalCentroids[j]);
+                if (dist < minDist) {
+                    minDist = dist;
+                    closestCentroidIdx = j;
+                }
+            }
+            counts[closestCentroidIdx]++;
+        }
+
+        const maxCountIdx = counts.indexOf(Math.max(...counts));
+        return toRGBString(globalCentroids[maxCountIdx]);
+    }
+
+    function findNearestCluster(color, clusters, threshold = 60) {
+        const rgb = parseRGB(color);
+        let minDist = Infinity;
+        let nearestCluster = null;
+        for (const cluster of clusters) {
+            const dist = colorDistance(rgb, parseRGB(cluster));
+            if (dist < minDist) {
+                minDist = dist;
+                nearestCluster = cluster;
+            }
+            if (dist < threshold) {
+                return cluster;
+            }
+        }
+        return nearestCluster || clusters[0];
+    }
+
+    function getRegion(grid) {
+        const startColor = grid[0][0];
         const visited = Array(GRID_ROWS).fill().map(() => Array(GRID_COLS).fill(false));
         const region = [];
-        const stack = [[startR, startC]];
-
+        const stack = [[0, 0]];
         while (stack.length) {
             const [r, c] = stack.pop();
             if (r < 0 || c < 0 || r >= GRID_ROWS || c >= GRID_COLS) continue;
             if (visited[r][c] || grid[r][c] !== startColor) continue;
             visited[r][c] = true;
             region.push([r, c]);
-            stack.push([r + 1, c], [r - 1, c], [r, c + 1], [r, c - 1]);
+            stack.push([r+1, c], [r-1, c], [r, c+1], [r, c-1]);
         }
         return region;
     }
@@ -92,7 +233,7 @@
         return grid.every(row => row.every(cell => cell === first));
     }
 
-    function solveGrid(startGrid) {
+    function solveGrid(startGrid, uniqueColors) {
         const key = g => g.map(r => r.join(',')).join(';');
         const beamWidth = 10;
         const maxDepth = 25;
@@ -103,19 +244,14 @@
             const nextCandidates = [];
             for (const { grid, seq } of beam) {
                 const current = grid[0][0];
-                const used = new Set([current]);
-                for (let r = 0; r < GRID_ROWS; r++) {
-                    for (let c = 0; c < GRID_COLS; c++) {
-                        const color = grid[r][c];
-                        if (used.has(color)) continue;
-                        used.add(color);
-                        const nextGrid = floodFillGrid(grid, color);
-                        const k = key(nextGrid);
-                        if (seen.has(k)) continue;
-                        seen.add(k);
-                        const regionSize = getRegion(nextGrid).length;
-                        nextCandidates.push({ grid: nextGrid, seq: [...seq, color], size: regionSize });
-                    }
+                for (const color of uniqueColors) {
+                    if (color === current) continue;
+                    const nextGrid = floodFillGrid(grid, color);
+                    const k = key(nextGrid);
+                    if (seen.has(k)) continue;
+                    seen.add(k);
+                    const regionSize = getRegion(nextGrid).length;
+                    nextCandidates.push({ grid: nextGrid, seq: [...seq, color], size: regionSize });
                 }
             }
             if (!nextCandidates.length) break;
@@ -128,19 +264,6 @@
         return beam[0].seq;
     }
 
-    function drawGrid(grid) {
-        const cellW = canvas.width / GRID_COLS;
-        const cellH = canvas.height / GRID_ROWS;
-        for (let r = 0; r < GRID_ROWS; r++) {
-            for (let c = 0; c < GRID_COLS; c++) {
-                const label = grid[r][c];
-                const [rVal, gVal, bVal] = colorPalette[label];
-                ctx.fillStyle = `rgb(${rVal}, ${gVal}, ${bVal})`;
-                ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
-            }
-        }
-    }
-
     upload.addEventListener('change', event => {
         const file = event.target.files[0];
         if (!file) return;
@@ -149,77 +272,86 @@
             canvas.width = img.width;
             canvas.height = img.height;
             ctx.drawImage(img, 0, 0);
-            const data = ctx.getImageData(0, 0, img.width, img.height).data;
 
+            // Step 1: Sample pixels from the center of each grid cell
             const cellW = Math.floor(img.width / GRID_COLS);
             const cellH = Math.floor(img.height / GRID_ROWS);
-            const avgColors = [];
-            const gridRGB = [];
+            let sampledColors = [];
 
             for (let r = 0; r < GRID_ROWS; r++) {
-                const row = [];
                 for (let c = 0; c < GRID_COLS; c++) {
-                    let rSum = 0, gSum = 0, bSum = 0, count = 0;
-                    for (let y = r * cellH; y < (r + 1) * cellH; y++) {
-                        for (let x = c * cellW; x < (c + 1) * cellW; x++) {
-                            const i = (y * img.width + x) * 4;
-                            rSum += data[i];
-                            gSum += data[i + 1];
-                            bSum += data[i + 2];
-                            count++;
-                        }
+                    const region = ctx.getImageData(
+                        c * cellW + cellW / 2 - 2,
+                        r * cellH + cellH / 2 - 2,
+                        5,
+                        5
+                    );
+                    for (let i = 0; i < region.data.length; i += 4) {
+                        const r = region.data[i], g = region.data[i + 1], b = region.data[i + 2];
+                        sampledColors.push([r, g, b]);
                     }
-                    const avg = [
-                        Math.round(rSum / count),
-                        Math.round(gSum / count),
-                        Math.round(bSum / count)
-                    ];
-                    avgColors.push(avg);
-                    row.push(avg);
                 }
-                gridRGB.push(row);
             }
 
-            const { clusters, labels } = groupColors(avgColors);
-            colorPalette = clusters;
-            output.textContent = `Detected ${clusters.length} unique colors\n`;
+            // Log sampled colors for debugging
+            console.log(`Sampled ${sampledColors.length} colors`);
 
+            // Step 2: Apply k-means clustering
+            const globalCentroids = kMeansClustering(sampledColors, EXPECTED_COLORS);
+            const globalColors = globalCentroids.map(toRGBString);
+
+            // Step 3: Build the grid by mapping each cell's dominant color
             const grid = [];
-            let idx = 0;
+            const colorMap = {};
+
             for (let r = 0; r < GRID_ROWS; r++) {
                 const row = [];
                 for (let c = 0; c < GRID_COLS; c++) {
-                    row.push(labels[idx++]);
+                    const region = ctx.getImageData(
+                        c * cellW + cellW / 2 - 2,
+                        r * cellH + cellH / 2 - 2,
+                        5,
+                        5
+                    );
+                    const color = getDominantColor(region.data, globalCentroids);
+                    row.push(color);
+                    colorMap[color] = true;
                 }
                 grid.push(row);
             }
 
-            currentGrid = grid;
-            drawGrid(currentGrid);
-            output.textContent += 'Solving...\n';
-            stepsDiv.innerHTML = '';
+            // Step 4: Report detected colors and display buttons
+            const uniqueColors = Object.keys(colorMap);
+            output.textContent = `Detected ${uniqueColors.length} clustered colors.\n`;
+            console.log(`Unique colors: ${uniqueColors}`);
+            colorButtons.innerHTML = '';
+            for (const color of uniqueColors) {
+                const btn = document.createElement('div');
+                btn.className = 'color-button';
+                btn.style.background = color;
+                btn.title = color;
+                colorButtons.appendChild(btn);
+            }
+
+            // Step 5: Solve the puzzle
             status.textContent = 'Solving...';
-
             setTimeout(() => {
-                const solution = solveGrid(grid);
+                const solution = solveGrid(grid, uniqueColors);
                 status.textContent = '';
-                output.textContent += `Solution (${solution.length} moves): ${solution.join(', ')}\n`;
-
-                let stepGrid = grid;
-                stepsDiv.innerHTML = '';
-                solution.forEach((colorLabel, index) => {
-                    const color = colorPalette[colorLabel];
-                    const btn = document.createElement('div');
-                    btn.className = 'color-step';
-                    btn.title = `Step ${index + 1}: Color ${colorLabel}`;
-                    btn.style.backgroundColor = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
-                    btn.addEventListener('click', () => {
-                        stepGrid = floodFillGrid(stepGrid, colorLabel);
-                        currentGrid = stepGrid;
-                        drawGrid(stepGrid);
-                    });
-                    stepsDiv.appendChild(btn);
+                // Display solution as a numbered list with colored squares
+                output.textContent += `Solution (${solution.length} moves):\n`;
+                const ol = document.createElement('ol');
+                solution.forEach((color, index) => {
+                    const li = document.createElement('li');
+                    li.className = 'solution-step';
+                    const colorSquare = document.createElement('div');
+                    colorSquare.className = 'solution-color';
+                    colorSquare.style.background = color;
+                    li.appendChild(colorSquare);
+                    li.appendChild(document.createTextNode(` ${color}`));
+                    ol.appendChild(li);
                 });
+                output.appendChild(ol);
             }, 50);
         };
         img.src = URL.createObjectURL(file);
