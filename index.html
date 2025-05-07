@@ -51,6 +51,9 @@
     const EXPECTED_COLORS = 6;
     const COLOR_MERGE_THRESHOLD = 50;
 
+    let currentGrid = null; // Store the current grid state
+    let stepCount = 0; // Track manual steps
+
     // Return Euclidean distance in RGB space
     function colorDistance(c1, c2) {
         const [r1, g1, b1] = c1;
@@ -233,12 +236,33 @@
         return grid.every(row => row.every(cell => cell === first));
     }
 
+    function getDistinctColors(grid) {
+        const colors = new Set();
+        grid.forEach(row => row.forEach(cell => colors.add(cell)));
+        return colors.size;
+    }
+
+    function drawGrid(grid, cellW, cellH) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                ctx.fillStyle = grid[r][c];
+                ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(c * cellW, r * cellH, cellW, cellH);
+            }
+        }
+    }
+
     function solveGrid(startGrid, uniqueColors) {
         const key = g => g.map(r => r.join(',')).join(';');
-        const beamWidth = 10;
-        const maxDepth = 25;
-        let beam = [{ grid: startGrid, seq: [], size: getRegion(startGrid).length }];
+        const beamWidth = 20;
+        const maxDepth = 50;
+        let beam = [{ grid: startGrid, seq: [], size: getRegion(startGrid).length, distinct: getDistinctColors(startGrid) }];
+        let bestSolution = { seq: [], size: 0, distinct: beam[0].distinct };
         const seen = new Set([key(startGrid)]);
+
+        console.log('Starting grid:', startGrid.map(row => row.join(' | ')).join('\n'));
 
         for (let depth = 0; depth < maxDepth; depth++) {
             const nextCandidates = [];
@@ -251,17 +275,44 @@
                     if (seen.has(k)) continue;
                     seen.add(k);
                     const regionSize = getRegion(nextGrid).length;
-                    nextCandidates.push({ grid: nextGrid, seq: [...seq, color], size: regionSize });
+                    const distinctColors = getDistinctColors(nextGrid);
+                    const score = regionSize - distinctColors * 10;
+                    nextCandidates.push({
+                        grid: nextGrid,
+                        seq: [...seq, color],
+                        size: regionSize,
+                        distinct: distinctColors
+                    });
+                    if (regionSize > bestSolution.size || (regionSize === bestSolution.size && distinctColors < bestSolution.distinct)) {
+                        bestSolution = { seq: [...seq, color], size: regionSize, distinct: distinctColors };
+                    }
+                    console.log(`Depth ${depth + 1}, Color ${color}, Region size: ${regionSize}, Distinct colors: ${distinctColors}`);
                 }
             }
-            if (!nextCandidates.length) break;
-            nextCandidates.sort((a, b) => b.size - a.size);
+            if (!nextCandidates.length) {
+                console.log('No more candidates at depth', depth);
+                break;
+            }
+            nextCandidates.sort((a, b) => (b.size - b.distinct * 10) - (a.size - a.distinct * 10));
             beam = nextCandidates.slice(0, beamWidth);
             for (const { grid, seq } of beam) {
-                if (isUniform(grid)) return seq;
+                if (isUniform(grid)) {
+                    console.log('Solution found:', seq);
+                    let testGrid = startGrid.map(row => row.slice());
+                    for (const color of seq) {
+                        testGrid = floodFillGrid(testGrid, color);
+                    }
+                    if (isUniform(testGrid)) {
+                        console.log('Solution verified as correct');
+                        return seq;
+                    } else {
+                        console.log('Solution invalid, continuing search');
+                    }
+                }
             }
         }
-        return beam[0].seq;
+        console.log('No complete solution found, returning best partial solution:', bestSolution.seq);
+        return bestSolution.seq;
     }
 
     upload.addEventListener('change', event => {
@@ -269,90 +320,124 @@
         if (!file) return;
         const img = new Image();
         img.onload = () => {
-            canvas.width = img.width;
-            canvas.height = img.height;
-            ctx.drawImage(img, 0, 0);
+            try {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
 
-            // Step 1: Sample pixels from the center of each grid cell
-            const cellW = Math.floor(img.width / GRID_COLS);
-            const cellH = Math.floor(img.height / GRID_ROWS);
-            let sampledColors = [];
+                // Step 1: Sample pixels from the center of each grid cell
+                const cellW = Math.floor(img.width / GRID_COLS);
+                const cellH = Math.floor(img.height / GRID_ROWS);
+                let sampledColors = [];
 
-            for (let r = 0; r < GRID_ROWS; r++) {
-                for (let c = 0; c < GRID_COLS; c++) {
-                    const region = ctx.getImageData(
-                        c * cellW + cellW / 2 - 2,
-                        r * cellH + cellH / 2 - 2,
-                        5,
-                        5
-                    );
-                    for (let i = 0; i < region.data.length; i += 4) {
-                        const r = region.data[i], g = region.data[i + 1], b = region.data[i + 2];
-                        sampledColors.push([r, g, b]);
+                for (let r = 0; r < GRID_ROWS; r++) {
+                    for (let c = 0; c < GRID_COLS; c++) {
+                        const region = ctx.getImageData(
+                            c * cellW + cellW / 2 - 2,
+                            r * cellH + cellH / 2 - 2,
+                            5,
+                            5
+                        );
+                        for (let i = 0; i < region.data.length; i += 4) {
+                            const r = region.data[i], g = region.data[i + 1], b = region.data[i + 2];
+                            sampledColors.push([r, g, b]);
+                        }
                     }
                 }
-            }
 
-            // Log sampled colors for debugging
-            console.log(`Sampled ${sampledColors.length} colors`);
+                console.log(`Sampled ${sampledColors.length} colors`);
 
-            // Step 2: Apply k-means clustering
-            const globalCentroids = kMeansClustering(sampledColors, EXPECTED_COLORS);
-            const globalColors = globalCentroids.map(toRGBString);
+                // Step 2: Apply k-means clustering
+                const globalCentroids = kMeansClustering(sampledColors, EXPECTED_COLORS);
+                const globalColors = globalCentroids.map(toRGBString);
 
-            // Step 3: Build the grid by mapping each cell's dominant color
-            const grid = [];
-            const colorMap = {};
+                // Step 3: Build the grid by mapping each cell's dominant color
+                currentGrid = [];
+                const colorMap = {};
 
-            for (let r = 0; r < GRID_ROWS; r++) {
-                const row = [];
-                for (let c = 0; c < GRID_COLS; c++) {
-                    const region = ctx.getImageData(
-                        c * cellW + cellW / 2 - 2,
-                        r * cellH + cellH / 2 - 2,
-                        5,
-                        5
-                    );
-                    const color = getDominantColor(region.data, globalCentroids);
-                    row.push(color);
-                    colorMap[color] = true;
+                for (let r = 0; r < GRID_ROWS; r++) {
+                    const row = [];
+                    for (let c = 0; c < GRID_COLS; c++) {
+                        const region = ctx.getImageData(
+                            c * cellW + cellW / 2 - 2,
+                            r * cellH + cellH / 2 - 2,
+                            5,
+                            5
+                        );
+                        const color = getDominantColor(region.data, globalCentroids);
+                        row.push(color);
+                        colorMap[color] = true;
+                    }
+                    currentGrid.push(row);
                 }
-                grid.push(row);
-            }
 
-            // Step 4: Report detected colors and display buttons
-            const uniqueColors = Object.keys(colorMap);
-            output.textContent = `Detected ${uniqueColors.length} clustered colors.\n`;
-            console.log(`Unique colors: ${uniqueColors}`);
-            colorButtons.innerHTML = '';
-            for (const color of uniqueColors) {
-                const btn = document.createElement('div');
-                btn.className = 'color-button';
-                btn.style.background = color;
-                btn.title = color;
-                colorButtons.appendChild(btn);
-            }
+                // Step 4: Draw initial grid and report detected colors
+                drawGrid(currentGrid, cellW, cellH);
+                const uniqueColors = Object.keys(colorMap);
+                output.textContent = `Detected ${uniqueColors.length} clustered colors.\n`;
+                console.log(`Unique colors: ${uniqueColors}`);
+                colorButtons.innerHTML = '';
+                stepCount = 0;
+                status.textContent = `Step ${stepCount}: Select a color to fill.`;
 
-            // Step 5: Solve the puzzle
-            status.textContent = 'Solving...';
-            setTimeout(() => {
-                const solution = solveGrid(grid, uniqueColors);
+                for (const color of uniqueColors) {
+                    const btn = document.createElement('div');
+                    btn.className = 'color-button';
+                    btn.style.background = color;
+                    btn.title = color;
+                    btn.addEventListener('click', () => {
+                        if (isUniform(currentGrid)) {
+                            status.textContent = 'Puzzle already solved!';
+                            return;
+                        }
+                        if (color === currentGrid[0][0]) {
+                            status.textContent = `Step ${stepCount}: Cannot select the current color (${color}).`;
+                            return;
+                        }
+                        stepCount++;
+                        currentGrid = floodFillGrid(currentGrid, color);
+                        drawGrid(currentGrid, cellW, cellH);
+                        if (isUniform(currentGrid)) {
+                            status.textContent = `Puzzle solved in ${stepCount} steps!`;
+                        } else {
+                            status.textContent = `Step ${stepCount}: Select a color to fill.`;
+                        }
+                    });
+                    colorButtons.appendChild(btn);
+                }
+
+                // Step 5: Compute and display the suggested solution
+                setTimeout(() => {
+                    try {
+                        const solution = solveGrid(currentGrid, uniqueColors);
+                        output.textContent += `Suggested solution (${solution.length} moves):\n`;
+                        if (solution.length === 0) {
+                            output.textContent += 'No solution found. Try adjusting the image or check console for details.';
+                            console.log('Empty solution returned');
+                            return;
+                        }
+                        const ol = document.createElement('ol');
+                        solution.forEach((color, index) => {
+                            const li = document.createElement('li');
+                            li.className = 'solution-step';
+                            const colorSquare = document.createElement('div');
+                            colorSquare.className = 'solution-color';
+                            colorSquare.style.background = color;
+                            li.appendChild(colorSquare);
+                            li.appendChild(document.createTextNode(` ${color}`));
+                            ol.appendChild(li);
+                        });
+                        output.appendChild(ol);
+                    } catch (error) {
+                        output.textContent += 'Error computing suggested solution. Check console for details.';
+                        console.error('Solve error:', error);
+                    }
+                }, 100);
+            } catch (error) {
                 status.textContent = '';
-                // Display solution as a numbered list with colored squares
-                output.textContent += `Solution (${solution.length} moves):\n`;
-                const ol = document.createElement('ol');
-                solution.forEach((color, index) => {
-                    const li = document.createElement('li');
-                    li.className = 'solution-step';
-                    const colorSquare = document.createElement('div');
-                    colorSquare.className = 'solution-color';
-                    colorSquare.style.background = color;
-                    li.appendChild(colorSquare);
-                    li.appendChild(document.createTextNode(` ${color}`));
-                    ol.appendChild(li);
-                });
-                output.appendChild(ol);
-            }, 50);
+                output.textContent = 'Error processing image. Check console for details.';
+                console.error('Image processing error:', error);
+            }
         };
         img.src = URL.createObjectURL(file);
     });
